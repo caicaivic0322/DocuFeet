@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
 RiskLevel = Literal["低风险", "中风险", "高风险"]
+BackendName = Literal["medgemma", "ollama"]
 
 
 class RuleAlert(BaseModel):
@@ -20,6 +21,13 @@ class CitationItem(BaseModel):
     excerpt: str
 
 
+class InferenceMeta(BaseModel):
+    backend: BackendName
+    used_fallback: bool = False
+    primary_backend: BackendName = "medgemma"
+    fallback_reason: Optional[str] = None
+
+
 class AnalysisResponse(BaseModel):
     risk_level: RiskLevel
     doctor_summary: str
@@ -30,6 +38,7 @@ class AnalysisResponse(BaseModel):
     medication_watchouts: list[str] = Field(default_factory=list)
     citations: list[CitationItem] = Field(default_factory=list)
     applied_rules: list[RuleAlert] = Field(default_factory=list)
+    inference: Optional[InferenceMeta] = None
     disclaimer: str = (
         "本工具仅用于基层临床辅助，不提供确定诊断；高风险或病情进展时应立即转诊或人工复核。"
     )

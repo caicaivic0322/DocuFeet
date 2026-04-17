@@ -103,6 +103,9 @@ class MedGemmaRuntime:
     _processor: object | None = None
     _model: object | None = None
 
+    def is_loaded(self) -> bool:
+        return self._loaded
+
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
