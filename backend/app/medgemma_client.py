@@ -17,6 +17,77 @@ class MedGemmaRuntimeError(RuntimeError):
     pass
 
 
+def _coerce_medgemma_payload(payload: dict) -> dict:
+    """Normalize common single-shot model formatting slips before validation."""
+    if payload.get("risk_level") == "低风险|中风险|高风险":
+        payload["risk_level"] = "中风险"
+
+    if _looks_like_schema_instruction(payload.get("doctor_summary")):
+        payload["doctor_summary"] = "MedGemma 未返回具体摘要，请结合规则命中和原始资料人工复核。"
+
+    for key in (
+        "abnormal_findings",
+        "possible_causes",
+        "next_steps",
+        "urgent_transfer_reasons",
+        "medication_watchouts",
+    ):
+        if isinstance(payload.get(key), list):
+            payload[key] = [
+                item for item in payload[key] if not _looks_like_schema_instruction(item)
+            ]
+
+    if isinstance(payload.get("citations"), list):
+        payload["citations"] = [
+            item
+            for item in payload["citations"]
+            if not (
+                isinstance(item, dict)
+                and (
+                    _looks_like_schema_instruction(item.get("source"))
+                    or _looks_like_schema_instruction(item.get("excerpt"))
+                )
+            )
+        ]
+    return payload
+
+
+def _looks_like_schema_instruction(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.startswith(("写出", "结合", "如需", "规则命中或本地知识片段名称", "引用的具体依据"))
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start : index + 1]
+
+    return None
+
+
 @dataclass
 class MedGemmaRuntime:
     """Lazy-loaded runtime for MedGemma.
@@ -150,13 +221,12 @@ class MedGemmaRuntime:
         # We still require JSON output; try to parse the first JSON object found.
         text = decoded[0].strip()
         import json
-        import re
 
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
+        json_text = _extract_first_json_object(text)
+        if not json_text:
             raise MedGemmaRuntimeError("MedGemma 输出未包含 JSON 对象，请调整提示词或 max_new_tokens。")
 
-        return AnalysisResponse.model_validate(json.loads(match.group(0)))
+        return AnalysisResponse.model_validate(_coerce_medgemma_payload(json.loads(json_text)))
 
 
 medgemma_runtime = MedGemmaRuntime()

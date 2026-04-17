@@ -20,16 +20,16 @@ def build_system_prompt() -> str:
 5. 对高风险情况优先提醒转诊，不要被单一检验指标误导。
 6. 输出 JSON，不要输出 Markdown。
 
-JSON 字段要求：
+JSON 字段要求如下。注意：示例值只说明格式，不要照抄示例值；请根据病例信息生成具体内容。
 {
-  "risk_level": "低风险|中风险|高风险",
-  "doctor_summary": "一句到三句的临床摘要",
-  "abnormal_findings": ["异常点1", "异常点2"],
-  "possible_causes": ["可能原因1", "可能原因2"],
-  "next_steps": ["下一步1", "下一步2"],
-  "urgent_transfer_reasons": ["需要立即转诊的原因"],
-  "medication_watchouts": ["用药注意事项"],
-  "citations": [{"source": "来源", "excerpt": "引用内容"}]
+  "risk_level": "中风险",
+  "doctor_summary": "结合症状、病史和检查结果写一到三句基层医生版摘要",
+  "abnormal_findings": ["写出具体异常指标或症状线索"],
+  "possible_causes": ["写出可能原因，避免确定诊断"],
+  "next_steps": ["写出基层场景下可执行的下一步检查、观察或转诊动作"],
+  "urgent_transfer_reasons": ["如需转诊，写出具体理由；如无则返回空数组"],
+  "medication_watchouts": ["结合当前用药写注意事项；如无则返回空数组"],
+  "citations": [{"source": "规则命中或本地知识片段名称", "excerpt": "引用的具体依据"}]
 }
 """
 
