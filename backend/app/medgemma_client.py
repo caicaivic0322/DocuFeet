@@ -98,6 +98,33 @@ def _prepare_medgemma_prompt(prompt: str, *, has_image: bool, boi_token: str | N
     return f"{boi_token}\n{prompt}"
 
 
+def _choose_torch_device(
+    requested_device: str,
+    *,
+    mps_available: bool,
+    cuda_available: bool,
+) -> str:
+    normalized = requested_device.strip().lower()
+    if normalized != "auto":
+        return normalized
+    if mps_available:
+        return "mps"
+    if cuda_available:
+        return "cuda"
+    return "cpu"
+
+
+def _generation_kwargs(*, device: str, max_new_tokens: int, temperature: float) -> dict:
+    kwargs = {"max_new_tokens": max_new_tokens}
+    if device == "mps":
+        kwargs["do_sample"] = False
+        return kwargs
+    kwargs["do_sample"] = temperature > 0
+    if kwargs["do_sample"]:
+        kwargs["temperature"] = temperature
+    return kwargs
+
+
 @dataclass
 class MedGemmaRuntime:
     """Lazy-loaded runtime for MedGemma.
@@ -112,9 +139,13 @@ class MedGemmaRuntime:
     _loaded: bool = False
     _processor: object | None = None
     _model: object | None = None
+    _actual_device: str = "not_loaded"
 
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def actual_device(self) -> str:
+        return self._actual_device
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -140,16 +171,35 @@ class MedGemmaRuntime:
         os.environ.setdefault("HF_TOKEN", settings.medgemma_hf_token)
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", settings.medgemma_hf_token)
 
+        actual_device = _choose_torch_device(
+            settings.medgemma_device,
+            mps_available=hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
+            cuda_available=torch.cuda.is_available(),
+        )
+        dtype = (
+            getattr(torch, "float16", None)
+            if actual_device in {"mps", "cuda"}
+            else getattr(torch, "float32", None)
+        )
+
         processor = AutoProcessor.from_pretrained(settings.medgemma_model_id, token=True)
         model = AutoModelForImageTextToText.from_pretrained(
             settings.medgemma_model_id,
-            torch_dtype=getattr(torch, "bfloat16", None) or getattr(torch, "float16", None),
-            device_map=None if settings.medgemma_device == "auto" else settings.medgemma_device,
+            torch_dtype=dtype,
+            device_map=None,
             token=True,
         )
+        if actual_device != "cpu":
+            try:
+                model = model.to(actual_device)
+            except Exception as exc:
+                raise MedGemmaRuntimeError(
+                    f"MedGemma 无法移动到 {actual_device}，请将 MEDGEMMA_DEVICE=cpu 后重试：{exc}"
+                ) from exc
 
         self._processor = processor
         self._model = model
+        self._actual_device = actual_device
         self._loaded = True
 
     def analyze(
@@ -227,13 +277,18 @@ class MedGemmaRuntime:
         except Exception:
             pass
 
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=settings.medgemma_max_new_tokens,
-                do_sample=settings.ollama_temperature > 0,
-                temperature=settings.ollama_temperature,
-            )
+        try:
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    **_generation_kwargs(
+                        device=self._actual_device,
+                        max_new_tokens=settings.medgemma_max_new_tokens,
+                        temperature=settings.ollama_temperature,
+                    ),
+                )
+        except RuntimeError as exc:
+            raise MedGemmaRuntimeError(f"MedGemma 生成失败：{exc}") from exc
 
         decoded = processor.batch_decode(output_ids, skip_special_tokens=True)
         if not decoded:

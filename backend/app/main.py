@@ -41,7 +41,8 @@ model_runtime_state: dict[str, dict] = {
         "status": "ready" if medgemma_runtime.is_loaded() else "not_loaded",
         "model_id": settings.medgemma_model_id,
         "configured": bool(settings.medgemma_hf_token),
-        "device": settings.medgemma_device,
+        "device": medgemma_runtime.actual_device(),
+        "configured_device": settings.medgemma_device,
         "message": "等待后台加载 MedGemma。" if settings.medgemma_hf_token else "MedGemma 未配置 HF token。",
         "updated_at": None,
     },
@@ -103,6 +104,7 @@ async def _warm_medgemma() -> None:
         model_runtime_state["medgemma"].update(
             status="ready",
             message="MedGemma 已加载，默认用于医生工作台分析。",
+            device=medgemma_runtime.actual_device(),
             updated_at=_now_iso(),
         )
 
@@ -129,6 +131,7 @@ async def startup_models() -> None:
         model_runtime_state["medgemma"].update(
             status="ready" if medgemma_runtime.is_loaded() else "failed",
             message="MedGemma 已加载。" if medgemma_runtime.is_loaded() else "MedGemma 未配置 HF token。",
+            device=medgemma_runtime.actual_device(),
             updated_at=_now_iso(),
         )
     asyncio.create_task(_refresh_ollama_runtime_state())
@@ -181,6 +184,7 @@ async def inference_status() -> dict:
         model_runtime_state["medgemma"].update(
             status="ready",
             message="MedGemma 已加载，默认用于医生工作台分析。",
+            device=medgemma_runtime.actual_device(),
             updated_at=_now_iso(),
         )
 
@@ -229,6 +233,7 @@ async def analyze_report(
             model_runtime_state["medgemma"].update(
                 status="ready",
                 message="MedGemma 已加载，默认用于医生工作台分析。",
+                device=medgemma_runtime.actual_device(),
                 updated_at=_now_iso(),
             )
 

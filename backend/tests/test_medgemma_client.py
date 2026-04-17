@@ -2,7 +2,9 @@ import unittest
 
 from app.medgemma_client import (
     _coerce_medgemma_payload,
+    _choose_torch_device,
     _extract_first_json_object,
+    _generation_kwargs,
     _prepare_medgemma_prompt,
 )
 
@@ -63,6 +65,37 @@ class MedGemmaPayloadTest(unittest.TestCase):
         prompt = _prepare_medgemma_prompt("仅分析文字病情。", has_image=False, boi_token="<start_of_image>")
 
         self.assertEqual(prompt, "仅分析文字病情。")
+
+    def test_auto_device_prefers_mps_when_available(self):
+        self.assertEqual(
+            _choose_torch_device("auto", mps_available=True, cuda_available=False),
+            "mps",
+        )
+
+    def test_auto_device_uses_cpu_when_no_accelerator_is_available(self):
+        self.assertEqual(
+            _choose_torch_device("auto", mps_available=False, cuda_available=False),
+            "cpu",
+        )
+
+    def test_explicit_device_overrides_auto_selection(self):
+        self.assertEqual(
+            _choose_torch_device("cpu", mps_available=True, cuda_available=True),
+            "cpu",
+        )
+
+    def test_mps_generation_uses_greedy_decoding_to_avoid_sampling_nans(self):
+        kwargs = _generation_kwargs(device="mps", max_new_tokens=256, temperature=0.2)
+
+        self.assertEqual(kwargs["max_new_tokens"], 256)
+        self.assertFalse(kwargs["do_sample"])
+        self.assertNotIn("temperature", kwargs)
+
+    def test_cpu_generation_keeps_sampling_when_temperature_is_enabled(self):
+        kwargs = _generation_kwargs(device="cpu", max_new_tokens=256, temperature=0.2)
+
+        self.assertTrue(kwargs["do_sample"])
+        self.assertEqual(kwargs["temperature"], 0.2)
 
 
 if __name__ == "__main__":
