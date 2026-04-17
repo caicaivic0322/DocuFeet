@@ -1,4 +1,4 @@
-import type { AnalysisResponse, AnalyzeReportInput, InferenceStatus } from './types'
+import type { AnalysisResponse, AnalyzeReportInput, BackendName, InferenceStatus } from './types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
@@ -18,6 +18,16 @@ async function readJson<T extends object>(response: Response): Promise<T> {
 
 export async function fetchInferenceStatus(): Promise<InferenceStatus> {
   const response = await fetch(`${API_BASE_URL}/api/inference/status`)
+  return readJson<InferenceStatus>(response)
+}
+
+export async function controlInferenceModel(
+  backend: BackendName,
+  action: 'load' | 'stop',
+): Promise<InferenceStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/inference/models/${backend}/${action}`, {
+    method: 'POST',
+  })
   return readJson<InferenceStatus>(response)
 }
 

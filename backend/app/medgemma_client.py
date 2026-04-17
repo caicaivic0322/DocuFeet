@@ -170,6 +170,23 @@ class MedGemmaRuntime:
     def actual_device(self) -> str:
         return self._actual_device
 
+    def unload(self) -> None:
+        previous_device = self._actual_device
+        self._processor = None
+        self._model = None
+        self._loaded = False
+        self._actual_device = "not_loaded"
+
+        try:
+            import torch  # type: ignore
+
+            if previous_device == "mps" and hasattr(torch, "mps"):
+                torch.mps.empty_cache()
+            elif previous_device == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return

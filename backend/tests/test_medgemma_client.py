@@ -1,6 +1,7 @@
 import unittest
 
 from app.medgemma_client import (
+    MedGemmaRuntime,
     _build_medgemma_messages,
     _coerce_medgemma_payload,
     _choose_torch_device,
@@ -120,6 +121,19 @@ class MedGemmaPayloadTest(unittest.TestCase):
     def test_restores_prefilled_json_opening_brace(self):
         self.assertEqual(_restore_json_prefill('"risk_level": "中风险"}'), '{"risk_level": "中风险"}')
         self.assertEqual(_restore_json_prefill('{"risk_level": "中风险"}'), '{"risk_level": "中风险"}')
+
+    def test_unload_resets_loaded_runtime_state(self):
+        runtime = MedGemmaRuntime(
+            _loaded=True,
+            _processor=object(),
+            _model=object(),
+            _actual_device="cpu",
+        )
+
+        runtime.unload()
+
+        self.assertFalse(runtime.is_loaded())
+        self.assertEqual(runtime.actual_device(), "not_loaded")
 
 
 if __name__ == "__main__":

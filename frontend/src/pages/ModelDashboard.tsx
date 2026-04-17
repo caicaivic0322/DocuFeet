@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { fetchInferenceStatus } from '../api'
+import { controlInferenceModel, fetchInferenceStatus } from '../api'
 import { StatusPill } from '../components/StatusPill'
-import type { InferenceStatus, ModelRuntime } from '../types'
+import type { BackendName, InferenceStatus, ModelRuntime } from '../types'
 
 const statusLabel = {
   ready: '就绪',
   loading: '加载中',
   failed: '不可用',
   not_loaded: '未加载',
+  disabled: '已停用',
 }
 
 function pickModel(status: InferenceStatus | null, backend: string): ModelRuntime | null {
@@ -17,6 +18,7 @@ function pickModel(status: InferenceStatus | null, backend: string): ModelRuntim
 export function ModelDashboard() {
   const [status, setStatus] = useState<InferenceStatus | null>(null)
   const [error, setError] = useState('')
+  const [actionKey, setActionKey] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -45,6 +47,21 @@ export function ModelDashboard() {
 
   const medgemma = pickModel(status, 'medgemma')
   const ollama = pickModel(status, 'ollama')
+
+  const handleModelAction = async (backend: BackendName, action: 'load' | 'stop') => {
+    const key = `${backend}:${action}`
+    setActionKey(key)
+    setError('')
+
+    try {
+      const payload = await controlInferenceModel(backend, action)
+      setStatus(payload)
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : '模型控制请求失败。')
+    } finally {
+      setActionKey(null)
+    }
+  }
 
   return (
     <div className="app-shell models-shell">
@@ -75,8 +92,18 @@ export function ModelDashboard() {
         </section>
 
         <section className="model-card-grid">
-          <ModelCard model={medgemma} role="Primary" />
-          <ModelCard model={ollama} role="Fallback" />
+          <ModelCard
+            model={medgemma}
+            role="Primary"
+            actionKey={actionKey}
+            onModelAction={handleModelAction}
+          />
+          <ModelCard
+            model={ollama}
+            role="Fallback"
+            actionKey={actionKey}
+            onModelAction={handleModelAction}
+          />
         </section>
 
         <section className="ops-grid">
@@ -130,10 +157,18 @@ export function ModelDashboard() {
 type ModelCardProps = {
   model: ModelRuntime | null
   role: string
+  actionKey: string | null
+  onModelAction: (backend: BackendName, action: 'load' | 'stop') => void
 }
 
-function ModelCard({ model, role }: ModelCardProps) {
+function ModelCard({ model, role, actionKey, onModelAction }: ModelCardProps) {
   const currentStatus = model?.status ?? 'not_loaded'
+  const backend = model?.backend
+  const loadingKey = backend ? `${backend}:load` : ''
+  const stopKey = backend ? `${backend}:stop` : ''
+  const isBusy = currentStatus === 'loading' || actionKey?.startsWith(`${backend}:`)
+  const loadDisabled = !backend || currentStatus === 'ready' || currentStatus === 'loading'
+  const stopDisabled = !backend || currentStatus === 'disabled' || currentStatus === 'not_loaded'
 
   return (
     <article className="model-card">
@@ -147,7 +182,30 @@ function ModelCard({ model, role }: ModelCardProps) {
 
       <p className="model-message">{model?.message ?? '正在读取后端状态。'}</p>
 
+      <div className="model-actions" aria-label={`${model?.name ?? '模型'}控制`}>
+        <button
+          className="control-button control-button-primary"
+          type="button"
+          disabled={loadDisabled || isBusy}
+          onClick={() => backend && onModelAction(backend, 'load')}
+        >
+          {actionKey === loadingKey ? '正在加载' : '加载模型'}
+        </button>
+        <button
+          className="control-button"
+          type="button"
+          disabled={stopDisabled || isBusy}
+          onClick={() => backend && onModelAction(backend, 'stop')}
+        >
+          {actionKey === stopKey ? '正在停用' : '停用模型'}
+        </button>
+      </div>
+
       <dl className="model-meta">
+        <div>
+          <dt>启用状态</dt>
+          <dd>{model?.active === false ? '停用' : '启用'}</dd>
+        </div>
         <div>
           <dt>模型</dt>
           <dd>{model?.model_id ?? '-'}</dd>

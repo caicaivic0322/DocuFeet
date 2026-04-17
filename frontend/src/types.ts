@@ -36,12 +36,13 @@ export type AnalysisResponse = {
   disclaimer: string
 }
 
-export type ModelRuntimeStatus = 'not_loaded' | 'loading' | 'ready' | 'failed'
+export type ModelRuntimeStatus = 'not_loaded' | 'loading' | 'ready' | 'failed' | 'disabled'
 
 export type ModelRuntime = {
   name: string
   backend: BackendName
   status: ModelRuntimeStatus
+  active?: boolean
   model_id: string
   configured?: boolean
   device?: string
