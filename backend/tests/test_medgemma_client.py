@@ -1,11 +1,14 @@
 import unittest
 
 from app.medgemma_client import (
+    _build_medgemma_messages,
     _coerce_medgemma_payload,
     _choose_torch_device,
     _extract_first_json_object,
     _generation_kwargs,
+    _slice_generated_token_ids,
     _prepare_medgemma_prompt,
+    _restore_json_prefill,
 )
 
 
@@ -96,6 +99,27 @@ class MedGemmaPayloadTest(unittest.TestCase):
 
         self.assertTrue(kwargs["do_sample"])
         self.assertEqual(kwargs["temperature"], 0.2)
+
+    def test_slices_prompt_tokens_before_decoding_generation(self):
+        output_ids = [[101, 102, 201, 202]]
+
+        self.assertEqual(_slice_generated_token_ids(output_ids, prompt_token_count=2), [[201, 202]])
+
+    def test_builds_chat_messages_with_image_content_first(self):
+        messages = _build_medgemma_messages(
+            system_prompt="系统规则",
+            user_prompt="病例信息",
+            image=object(),
+        )
+
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertEqual(messages[1]["content"][0]["type"], "image")
+        self.assertEqual(messages[1]["content"][1]["text"], "病例信息")
+
+    def test_restores_prefilled_json_opening_brace(self):
+        self.assertEqual(_restore_json_prefill('"risk_level": "中风险"}'), '{"risk_level": "中风险"}')
+        self.assertEqual(_restore_json_prefill('{"risk_level": "中风险"}'), '{"risk_level": "中风险"}')
 
 
 if __name__ == "__main__":

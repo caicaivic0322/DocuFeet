@@ -125,6 +125,29 @@ def _generation_kwargs(*, device: str, max_new_tokens: int, temperature: float) 
     return kwargs
 
 
+def _slice_generated_token_ids(output_ids, *, prompt_token_count: int):
+    if isinstance(output_ids, list):
+        return [row[prompt_token_count:] for row in output_ids]
+    return output_ids[:, prompt_token_count:]
+
+
+def _build_medgemma_messages(*, system_prompt: str, user_prompt: str, image: object | None) -> list[dict]:
+    user_content = []
+    if image is not None:
+        user_content.append({"type": "image", "image": image})
+    user_content.append({"type": "text", "text": user_prompt})
+
+    return [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _restore_json_prefill(text: str) -> str:
+    stripped = text.strip()
+    return stripped if stripped.startswith("{") else "{" + stripped
+
+
 @dataclass
 class MedGemmaRuntime:
     """Lazy-loaded runtime for MedGemma.
@@ -178,7 +201,7 @@ class MedGemmaRuntime:
         )
         dtype = (
             getattr(torch, "float16", None)
-            if actual_device in {"mps", "cuda"}
+            if actual_device == "cuda"
             else getattr(torch, "float32", None)
         )
 
@@ -217,19 +240,15 @@ class MedGemmaRuntime:
         self._ensure_loaded()
         assert self._processor is not None and self._model is not None
 
-        # Build a single-shot prompt (MedGemma is not optimized for multi-turn).
-        prompt = (
-            build_system_prompt()
-            + "\n\n"
-            + build_user_prompt(
-                patient_age=patient_age,
-                patient_sex=patient_sex,
-                symptoms=symptoms,
-                clinical_notes=clinical_notes,
-                current_medications=current_medications,
-                alerts=alerts,
-                image_filename=image_filename,
-            )
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(
+            patient_age=patient_age,
+            patient_sex=patient_sex,
+            symptoms=symptoms,
+            clinical_notes=clinical_notes,
+            current_medications=current_medications,
+            alerts=alerts,
+            image_filename=image_filename,
         )
 
         try:
@@ -255,17 +274,20 @@ class MedGemmaRuntime:
 
         processor = self._processor
         model = self._model
-        prompt = _prepare_medgemma_prompt(
-            prompt,
-            has_image=image is not None,
-            boi_token=getattr(processor, "boi_token", None),
+        messages = _build_medgemma_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image=image,
         )
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": "{"}]})
 
         try:
-            inputs = processor(
-                text=prompt,
-                images=image,
+            inputs = processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                return_dict=True,
                 return_tensors="pt",
+                continue_final_message=True,
             )
         except ValueError as exc:
             raise MedGemmaRuntimeError(f"MedGemma 输入处理失败：{exc}") from exc
@@ -290,17 +312,30 @@ class MedGemmaRuntime:
         except RuntimeError as exc:
             raise MedGemmaRuntimeError(f"MedGemma 生成失败：{exc}") from exc
 
-        decoded = processor.batch_decode(output_ids, skip_special_tokens=True)
+        generated_ids = _slice_generated_token_ids(
+            output_ids,
+            prompt_token_count=inputs["input_ids"].shape[-1],
+        )
+        decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)
         if not decoded:
             raise MedGemmaRuntimeError("MedGemma 未返回可解码输出。")
 
         # We still require JSON output; try to parse the first JSON object found.
-        text = decoded[0].strip()
+        text = _restore_json_prefill(decoded[0])
+        try:
+            generated_preview = generated_ids[0][:12].tolist()
+            generated_count = int(generated_ids.shape[-1])
+        except Exception:
+            generated_preview = []
+            generated_count = 0
         import json
 
         json_text = _extract_first_json_object(text)
         if not json_text:
-            raise MedGemmaRuntimeError("MedGemma 输出未包含 JSON 对象，请调整提示词或 max_new_tokens。")
+            raise MedGemmaRuntimeError(
+                "MedGemma 输出未包含 JSON 对象，请调整提示词或 max_new_tokens。"
+                f"生成 token 数={generated_count}，前序 token={generated_preview}。"
+            )
 
         return AnalysisResponse.model_validate(_coerce_medgemma_payload(json.loads(json_text)))
 
