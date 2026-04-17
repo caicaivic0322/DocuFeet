@@ -1,6 +1,10 @@
 import unittest
 
-from app.medgemma_client import _coerce_medgemma_payload, _extract_first_json_object
+from app.medgemma_client import (
+    _coerce_medgemma_payload,
+    _extract_first_json_object,
+    _prepare_medgemma_prompt,
+)
 
 
 class MedGemmaPayloadTest(unittest.TestCase):
@@ -48,6 +52,17 @@ class MedGemmaPayloadTest(unittest.TestCase):
         self.assertEqual(normalized["next_steps"], [])
         self.assertEqual(normalized["urgent_transfer_reasons"], [])
         self.assertEqual(normalized["citations"], [])
+
+    def test_adds_gemma_image_token_when_image_is_present(self):
+        prompt = _prepare_medgemma_prompt("请分析这张胸片。", has_image=True, boi_token="<start_of_image>")
+
+        self.assertTrue(prompt.startswith("<start_of_image>\n"))
+        self.assertIn("请分析这张胸片。", prompt)
+
+    def test_does_not_add_image_token_without_image(self):
+        prompt = _prepare_medgemma_prompt("仅分析文字病情。", has_image=False, boi_token="<start_of_image>")
+
+        self.assertEqual(prompt, "仅分析文字病情。")
 
 
 if __name__ == "__main__":

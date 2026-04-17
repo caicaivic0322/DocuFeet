@@ -3,10 +3,16 @@ import type { AnalysisResponse, AnalyzeReportInput, InferenceStatus } from './ty
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 async function readJson<T extends object>(response: Response): Promise<T> {
-  const payload = (await response.json()) as T | { detail?: string }
+  const text = await response.text()
+  const contentType = response.headers.get('content-type') ?? ''
+  const isJson = contentType.includes('application/json') || text.trim().startsWith('{')
+  const payload = (isJson && text ? JSON.parse(text) : { detail: text }) as T | { detail?: string }
+
   if (!response.ok) {
-    throw new Error('detail' in payload && payload.detail ? payload.detail : '请求失败，请稍后再试。')
+    const detail = 'detail' in payload ? payload.detail : ''
+    throw new Error(detail || `请求失败：HTTP ${response.status}`)
   }
+
   return payload as T
 }
 

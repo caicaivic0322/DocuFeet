@@ -88,6 +88,16 @@ def _extract_first_json_object(text: str) -> str | None:
     return None
 
 
+def _prepare_medgemma_prompt(prompt: str, *, has_image: bool, boi_token: str | None) -> str:
+    if not has_image:
+        return prompt
+    if not boi_token:
+        return prompt
+    if boi_token in prompt:
+        return prompt
+    return f"{boi_token}\n{prompt}"
+
+
 @dataclass
 class MedGemmaRuntime:
     """Lazy-loaded runtime for MedGemma.
@@ -195,12 +205,20 @@ class MedGemmaRuntime:
 
         processor = self._processor
         model = self._model
-
-        inputs = processor(
-            text=prompt,
-            images=image,
-            return_tensors="pt",
+        prompt = _prepare_medgemma_prompt(
+            prompt,
+            has_image=image is not None,
+            boi_token=getattr(processor, "boi_token", None),
         )
+
+        try:
+            inputs = processor(
+                text=prompt,
+                images=image,
+                return_tensors="pt",
+            )
+        except ValueError as exc:
+            raise MedGemmaRuntimeError(f"MedGemma 输入处理失败：{exc}") from exc
 
         # Best effort: move tensors to model device if needed
         try:
