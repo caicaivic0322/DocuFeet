@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 type RiskLevel = '低风险' | '中风险' | '高风险'
 
@@ -37,6 +37,17 @@ type OllamaStatus = {
   message: string
 }
 
+type InferenceStatus = {
+  default_backend: 'ollama' | 'medgemma'
+  ollama: OllamaStatus
+  medgemma: {
+    model_id: string
+    configured: boolean
+    device: string
+    message: string
+  }
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 const riskTone: Record<RiskLevel, string> = {
@@ -45,8 +56,13 @@ const riskTone: Record<RiskLevel, string> = {
   高风险: 'risk-high',
 }
 
+const modelDisplayName: Record<string, string> = {
+  'google/medgemma-1.5-4b-it': 'MedGemma 1.5 4B IT',
+}
+
 function App() {
   const [backend, setBackend] = useState<'ollama' | 'medgemma'>('ollama')
+  const backendTouched = useRef(false)
   const [patientAge, setPatientAge] = useState('')
   const [patientSex, setPatientSex] = useState('未提供')
   const [symptoms, setSymptoms] = useState('')
@@ -56,7 +72,7 @@ function App() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<AnalysisResponse | null>(null)
-  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null)
+  const [inferenceStatus, setInferenceStatus] = useState<InferenceStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(true)
   const [requestPhase, setRequestPhase] = useState('等待输入')
 
@@ -65,19 +81,17 @@ function App() {
 
     const loadStatus = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/ollama/status`)
-        const payload = (await response.json()) as OllamaStatus
+        const response = await fetch(`${API_BASE_URL}/api/inference/status`)
+        const payload = (await response.json()) as InferenceStatus
         if (!cancelled) {
-          setOllamaStatus(payload)
+          setInferenceStatus(payload)
+          if (!backendTouched.current) {
+            setBackend(payload.default_backend)
+          }
         }
       } catch {
         if (!cancelled) {
-          setOllamaStatus({
-            reachable: false,
-            base_url: 'http://127.0.0.1:11434',
-            model: 'gemma3:4b',
-            message: '无法获取模型服务状态，请检查后端或 Ollama 是否已启动。',
-          })
+          setInferenceStatus(null)
         }
       } finally {
         if (!cancelled) {
@@ -121,14 +135,61 @@ function App() {
     if (statusLoading) {
       return 'status-pending'
     }
-    if (!ollamaStatus?.reachable) {
+    if (!inferenceStatus) {
       return 'status-offline'
     }
-    if (ollamaStatus.has_model) {
+    if (inferenceStatus.default_backend === 'medgemma') {
+      return inferenceStatus.medgemma.configured ? 'status-ready' : 'status-warning'
+    }
+    if (inferenceStatus.ollama.reachable && inferenceStatus.ollama.has_model) {
       return 'status-ready'
     }
     return 'status-warning'
-  }, [ollamaStatus, statusLoading])
+  }, [inferenceStatus, statusLoading])
+
+  const statusHeadline = useMemo(() => {
+    if (statusLoading) {
+      return '检查推理服务中...'
+    }
+    if (!inferenceStatus) {
+      return '无法获取推理服务状态，请检查后端是否已启动。'
+    }
+    if (inferenceStatus.default_backend === 'medgemma') {
+      return inferenceStatus.medgemma.configured ? 'MedGemma 已接入本地后端' : 'MedGemma 尚未完成配置'
+    }
+    return inferenceStatus.ollama.message
+  }, [inferenceStatus, statusLoading])
+
+  const statusDetail = useMemo(() => {
+    if (!inferenceStatus) {
+      return '默认后端：未知'
+    }
+    if (inferenceStatus.default_backend === 'medgemma') {
+      return `默认后端：MedGemma · ${modelDisplayName[inferenceStatus.medgemma.model_id] ?? inferenceStatus.medgemma.model_id}`
+    }
+    return `默认后端：Ollama · ${inferenceStatus.ollama.model}`
+  }, [inferenceStatus])
+
+  const backendMeta = useMemo(() => {
+    if (!inferenceStatus) {
+      return '状态未知'
+    }
+    if (inferenceStatus.default_backend === 'medgemma') {
+      return `MedGemma / ${inferenceStatus.medgemma.device}`
+    }
+    return inferenceStatus.ollama.base_url
+  }, [inferenceStatus])
+
+  const statusRibbonDetails = useMemo(() => {
+    if (!inferenceStatus) {
+      return ['正在检查本地推理服务状态。']
+    }
+    const details = [inferenceStatus.medgemma.message, inferenceStatus.ollama.message]
+    if (inferenceStatus.ollama.available_models?.length) {
+      details.push(`Ollama 已发现模型：${inferenceStatus.ollama.available_models.join('、')}`)
+    }
+    return details
+  }, [inferenceStatus])
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null
@@ -193,7 +254,7 @@ function App() {
           <div className="brand-mark">乡</div>
           <div>
             <p className="eyebrow">基层医疗 AI 助手</p>
-            <p className="brand-subtitle">本地 Web · Ollama 驱动 · 医生优先</p>
+            <p className="brand-subtitle">本地 Web · MedGemma / Ollama · 医生优先</p>
           </div>
         </div>
         <nav className="topnav">
@@ -223,10 +284,8 @@ function App() {
             <div className={`service-status ${statusTone}`}>
               <span className="status-dot" />
               <div>
-                <strong>{statusLoading ? '检查模型服务中...' : ollamaStatus?.message ?? '模型服务状态未知'}</strong>
-                <p>
-                  {ollamaStatus?.model ? `目标模型：${ollamaStatus.model}` : '默认模型：gemma3:4b'}
-                </p>
+                <strong>{statusHeadline}</strong>
+                <p>{statusDetail}</p>
               </div>
             </div>
           </div>
@@ -265,8 +324,8 @@ function App() {
                     <strong>{requestPhase}</strong>
                   </div>
                   <div>
-                    <span className="meta-label">服务地址</span>
-                    <strong>{ollamaStatus?.base_url ?? 'http://127.0.0.1:11434'}</strong>
+                    <span className="meta-label">默认后端</span>
+                    <strong>{backendMeta}</strong>
                   </div>
                 </div>
               </div>
@@ -281,10 +340,9 @@ function App() {
               <h2>本地服务正在守着这条分析链路</h2>
             </div>
             <div className="status-ribbon-copy">
-              <p>{ollamaStatus?.message ?? '正在检查本地模型服务状态。'}</p>
-              {ollamaStatus?.available_models?.length ? (
-                <p>已发现模型：{ollamaStatus.available_models.join('、')}</p>
-              ) : null}
+              {statusRibbonDetails.map((detail) => (
+                <p key={detail}>{detail}</p>
+              ))}
             </div>
           </div>
         </section>
@@ -366,7 +424,10 @@ function App() {
                 <span>推理后端</span>
                 <select
                   value={backend}
-                  onChange={(event) => setBackend(event.target.value as 'ollama' | 'medgemma')}
+                  onChange={(event) => {
+                    backendTouched.current = true
+                    setBackend(event.target.value as 'ollama' | 'medgemma')
+                  }}
                 >
                   <option value="ollama">Ollama</option>
                   <option value="medgemma">MedGemma</option>
