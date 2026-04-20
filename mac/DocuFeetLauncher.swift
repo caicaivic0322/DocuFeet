@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow?
     private var webView: WKWebView?
     private var backendProcess: Process?
@@ -13,10 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let repoRoot = readRepoRoot()
         startServices(repoRoot: repoRoot)
         showWindow()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-            self?.loadApp()
-        }
+        showBootScreen(message: "正在启动本地医疗助手服务...")
+        waitForFrontend(remainingAttempts: 45)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -40,18 +38,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showWindow() {
-        let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        self.webView = webView
-
+        let windowRect = NSRect(x: 0, y: 0, width: 1280, height: 860)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
+            contentRect: windowRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
+
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        let webView = WKWebView(frame: window.contentView?.bounds ?? windowRect, configuration: configuration)
+        webView.autoresizingMask = [.width, .height]
+        webView.navigationDelegate = self
+        self.webView = webView
+
         window.center()
         window.title = "赤脚医生"
         window.contentView = webView
@@ -64,6 +66,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         webView?.load(URLRequest(url: url))
+    }
+
+    private func waitForFrontend(remainingAttempts: Int) {
+        guard remainingAttempts > 0 else {
+            showBootScreen(
+                message: "前端服务启动超时。请检查 /tmp/docufeet-frontend.log 和 /tmp/docufeet-backend.log。"
+            )
+            return
+        }
+
+        guard let url = URL(string: "http://127.0.0.1:5173/") else {
+            showBootScreen(message: "本地前端地址无效。")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.0
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                if let httpResponse = response as? HTTPURLResponse,
+                   (200..<500).contains(httpResponse.statusCode) {
+                    self?.loadApp()
+                    return
+                }
+
+                self?.showBootScreen(message: "正在等待前端服务启动...")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self?.waitForFrontend(remainingAttempts: remainingAttempts - 1)
+                }
+            }
+        }.resume()
+    }
+
+    private func showBootScreen(message: String) {
+        let html = """
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body {
+              margin: 0;
+              min-height: 100vh;
+              display: grid;
+              place-items: center;
+              font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+              color: #182021;
+              background:
+                radial-gradient(circle at 20% 10%, rgba(31, 107, 85, .18), transparent 32%),
+                linear-gradient(135deg, #edf1ef, #f8faf7);
+            }
+            main {
+              width: min(520px, calc(100vw - 48px));
+              padding: 30px;
+              border: 1px solid #d8dfdc;
+              border-radius: 28px;
+              background: rgba(251, 252, 250, .94);
+              box-shadow: 0 18px 48px rgba(24, 32, 33, .08);
+            }
+            h1 { margin: 0 0 12px; font-size: 28px; }
+            p { margin: 0; color: #657071; line-height: 1.7; }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>赤脚医生</h1>
+            <p>\(message)</p>
+          </main>
+        </body>
+        </html>
+        """
+        webView?.loadHTMLString(html, baseURL: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        showBootScreen(message: "页面加载失败：\(error.localizedDescription)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        showBootScreen(message: "页面加载失败：\(error.localizedDescription)")
     }
 
     private func startServices(repoRoot: URL) {
