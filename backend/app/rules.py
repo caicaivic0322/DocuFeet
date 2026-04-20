@@ -43,6 +43,18 @@ _RED_FLAG_RULES = [
 ]
 
 _RISK_ORDER: dict[RiskLevel, int] = {"低风险": 0, "中风险": 1, "高风险": 2}
+_NEGATION_MARKERS = ("无", "没有", "未见", "否认", "不伴", "未")
+
+
+def _keyword_is_negated(haystack: str, keyword: str) -> bool:
+    index = haystack.find(keyword)
+    while index != -1:
+        prefix = haystack[max(0, index - 4) : index]
+        if any(marker in prefix for marker in _NEGATION_MARKERS):
+            index = haystack.find(keyword, index + len(keyword))
+            continue
+        return False
+    return True
 
 
 def evaluate_red_flags(*parts: Optional[str]) -> list[RuleAlert]:
@@ -51,7 +63,10 @@ def evaluate_red_flags(*parts: Optional[str]) -> list[RuleAlert]:
 
     for rule in _RED_FLAG_RULES:
         matched = [
-            keyword for keyword in rule["keywords"] if keyword.lower() in haystack
+            keyword
+            for keyword in rule["keywords"]
+            if keyword.lower() in haystack
+            and not _keyword_is_negated(haystack, keyword.lower())
         ]
         if matched:
             alerts.append(

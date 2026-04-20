@@ -11,14 +11,14 @@ import httpx
 from starlette.concurrency import run_in_threadpool
 
 from .config import settings
-from .models import AnalysisResponse, HealthResponse, InferenceMeta
+from .models import AnalysisResponse, HealthResponse, InferenceMeta, RuleAlert
 from .ollama_client import OllamaClient, OllamaClientError
 from .medgemma_client import (
     medgemma_runtime,
     MedGemmaNotConfiguredError,
     MedGemmaRuntimeError,
 )
-from .rules import evaluate_red_flags, highest_risk
+from .rules import evaluate_red_flags
 
 app = FastAPI(title="乡镇医疗 AI 助手 API", version="0.1.0")
 app.add_middleware(
@@ -85,6 +85,55 @@ def _fallback_reason(medgemma_status: str) -> str:
 
 def _is_active(backend: str) -> bool:
     return bool(model_runtime_state[backend].get("active", True))
+
+
+def _contains_negated_concept(text: str, concept: str) -> bool:
+    negation_markers = ("无", "没有", "未见", "否认", "不伴", "未")
+    return any(f"{marker}{concept}" in text for marker in negation_markers)
+
+
+def _is_non_actionable_transfer_reason(reason: str) -> bool:
+    text = reason.strip()
+    if not text:
+        return True
+    non_reason_markers = ("无明确转诊理由", "无需转诊", "无转诊", "无急诊", "无明确急转")
+    return any(marker in text for marker in non_reason_markers)
+
+
+def _contradicts_negated_symptoms(reason: str, source_text: str) -> bool:
+    guarded_concepts = ("意识改变", "气促", "胸痛", "呼吸困难")
+    return any(
+        concept in reason and _contains_negated_concept(source_text, concept)
+        for concept in guarded_concepts
+    )
+
+
+def _postprocess_analysis_response(
+    response: AnalysisResponse,
+    *,
+    alerts: list[RuleAlert],
+    symptoms: Optional[str],
+    clinical_notes: Optional[str],
+) -> None:
+    source_text = " ".join(part for part in (symptoms, clinical_notes) if part)
+    response.urgent_transfer_reasons = [
+        reason
+        for reason in response.urgent_transfer_reasons
+        if not _is_non_actionable_transfer_reason(reason)
+        and not _contradicts_negated_symptoms(reason, source_text)
+    ]
+
+    high_risk_alerts = [alert for alert in alerts if alert.risk_level == "高风险"]
+    if high_risk_alerts:
+        response.risk_level = "高风险"
+        if not response.urgent_transfer_reasons:
+            response.urgent_transfer_reasons = [alert.rationale for alert in high_risk_alerts]
+        if not response.next_steps:
+            response.next_steps = [alert.recommended_action for alert in high_risk_alerts]
+        return
+
+    if response.risk_level == "高风险" and not response.urgent_transfer_reasons:
+        response.risk_level = "中风险"
 
 
 async def _warm_medgemma() -> None:
@@ -373,18 +422,12 @@ async def analyze_report(
         fallback_reason=_fallback_reason(medgemma_status) if used_fallback else None,
     )
 
-    if alerts and highest_risk(alerts) == "高风险" and response.risk_level != "高风险":
-        response.risk_level = "高风险"
-        if not response.urgent_transfer_reasons:
-            response.urgent_transfer_reasons = [
-                alert.rationale for alert in alerts if alert.risk_level == "高风险"
-            ]
-        if not response.next_steps:
-            response.next_steps = [
-                alert.recommended_action
-                for alert in alerts
-                if alert.risk_level == "高风险"
-            ]
+    _postprocess_analysis_response(
+        response,
+        alerts=alerts,
+        symptoms=symptoms,
+        clinical_notes=clinical_notes,
+    )
 
     response.applied_rules = alerts
     last_analysis = {
