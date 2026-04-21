@@ -2,28 +2,44 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
+from .cbc_ocr import CBCOCRExtractionError, extract_cbc_from_image
 from .config import settings
-from .models import AnalysisResponse, HealthResponse, InferenceMeta, RuleAlert
+from .models import (
+    AnalysisResponse,
+    HealthResponse,
+    InferenceMeta,
+    LabAnalysisInput,
+    LabExtractionResponse,
+    LabReportItem,
+    LabReportType,
+    MultiReportAnalysisInput,
+    ReferralCard,
+    RuleAlert,
+    StructuredLabReport,
+)
 from .ollama_client import OllamaClient, OllamaClientError
 from .medgemma_client import (
     medgemma_runtime,
     MedGemmaNotConfiguredError,
     MedGemmaRuntimeError,
 )
-from .rules import evaluate_red_flags
+from .rules import evaluate_cross_report_alerts, evaluate_red_flags, evaluate_structured_lab_alerts
 
 app = FastAPI(title="乡镇医疗 AI 助手 API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,6 +75,19 @@ model_runtime_state: dict[str, dict] = {
     },
 }
 last_analysis: dict | None = None
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SAMPLE_CBC_PATH = REPO_ROOT / "docs" / "sample-cbc-report.png"
+SAMPLE_CHEM_PATH = REPO_ROOT / "docs" / "sample-chemistry-report.png"
+WEB_DIST_DIR = Path(os.getenv("DOCUFEET_WEB_DIST", REPO_ROOT / "frontend" / "dist"))
+
+
+def _safe_frontend_path(asset_path: str) -> Path | None:
+    candidate = (WEB_DIST_DIR / asset_path).resolve()
+    try:
+        candidate.relative_to(WEB_DIST_DIR.resolve())
+    except ValueError:
+        return None
+    return candidate
 
 
 def _now_iso() -> str:
@@ -126,14 +155,297 @@ def _postprocess_analysis_response(
     high_risk_alerts = [alert for alert in alerts if alert.risk_level == "高风险"]
     if high_risk_alerts:
         response.risk_level = "高风险"
-        if not response.urgent_transfer_reasons:
-            response.urgent_transfer_reasons = [alert.rationale for alert in high_risk_alerts]
+        response.urgent_transfer_reasons = [alert.rationale for alert in high_risk_alerts]
         if not response.next_steps:
             response.next_steps = [alert.recommended_action for alert in high_risk_alerts]
         return
 
     if response.risk_level == "高风险" and not response.urgent_transfer_reasons:
         response.risk_level = "中风险"
+
+
+def _merge_alerts(*alert_groups: list[RuleAlert]) -> list[RuleAlert]:
+    merged: list[RuleAlert] = []
+    seen: set[tuple[str, str]] = set()
+    for group in alert_groups:
+        for alert in group:
+            key = (alert.title, alert.rationale)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(alert)
+    merged.sort(key=lambda item: {"低风险": 0, "中风险": 1, "高风险": 2}[item.risk_level], reverse=True)
+    return merged
+
+
+_REQUIRED_REPORT_ITEMS: dict[LabReportType, set[str]] = {
+    "cbc": {"WBC", "RBC", "HGB", "PLT"},
+    "chemistry_basic": {"Cr", "K", "Na", "GLU"},
+}
+
+
+def _build_structured_report(
+    *,
+    items: list[LabReportItem],
+    source_image_name: Optional[str],
+    report_type: LabReportType,
+) -> StructuredLabReport | None:
+    if not items:
+        return None
+    return StructuredLabReport(
+        report_type=report_type,
+        source_image_name=source_image_name,
+        items=items,
+    )
+
+
+def _validate_confirmed_lab_items(report_type: LabReportType, items: list[LabReportItem]) -> None:
+    required = _REQUIRED_REPORT_ITEMS[report_type]
+    confirmed_names = {item.name for item in items if item.confirmed and item.value.strip()}
+    missing = sorted(required - confirmed_names)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"关键检验字段缺失：{', '.join(missing)}。请确认识别结果后再分析。",
+        )
+
+
+def _validate_confirmed_reports(reports: list[StructuredLabReport]) -> None:
+    if not reports:
+        raise HTTPException(status_code=400, detail="请至少确认一份检验报告后再分析。")
+    for report in reports:
+        _validate_confirmed_lab_items(report.report_type, report.items)
+
+
+def _combine_reports_for_prompt(reports: list[StructuredLabReport]) -> StructuredLabReport | None:
+    if not reports:
+        return None
+    combined_items: list[LabReportItem] = []
+    source_names = []
+    for report in reports:
+        combined_items.extend(report.items)
+        if report.source_image_name:
+            source_names.append(report.source_image_name)
+    return StructuredLabReport(
+        report_type=reports[0].report_type,
+        source_image_name=" + ".join(source_names) if source_names else None,
+        items=combined_items,
+    )
+
+
+def _build_referral_card(
+    *,
+    response: AnalysisResponse,
+    structured_report: StructuredLabReport | None,
+    alerts: list[RuleAlert],
+) -> ReferralCard:
+    if response.risk_level == "高风险" or response.urgent_transfer_reasons:
+        decision = "立即转诊"
+    elif response.risk_level == "中风险":
+        decision = "尽快复诊"
+    else:
+        decision = "观察"
+
+    reasons = list(response.urgent_transfer_reasons)
+    if not reasons:
+        reasons.extend(alert.rationale for alert in alerts[:2])
+    if not reasons and structured_report:
+        for item in structured_report.items:
+            if item.flag in {"high", "low"}:
+                reasons.append(
+                    f"{item.name}={item.value or '未提供'} {item.unit or ''}".strip()
+                    + f"，参考范围 {item.reference_range or '未提供'}。"
+                )
+    if not reasons:
+        reasons.append("当前未见明确转诊红旗，建议结合病情动态观察。")
+
+    suggested_checks = response.next_steps[:3]
+    handoff_notes = []
+    if response.doctor_summary:
+        handoff_notes.append(response.doctor_summary)
+    if structured_report:
+        abnormal_items = [
+            item for item in structured_report.items if item.flag in {"high", "low"}
+        ]
+        if abnormal_items:
+            item_text = "；".join(
+                f"{item.name} {item.value or '未提供'} {item.unit or ''}".strip()
+                for item in abnormal_items[:3]
+            )
+            handoff_notes.append(f"已确认的异常检验字段：{item_text}")
+
+    if decision == "观察" and suggested_checks:
+        decision = "尽快复诊"
+
+    return ReferralCard(
+        decision=decision,
+        reasons=reasons[:3],
+        suggested_checks=suggested_checks,
+        handoff_notes=handoff_notes[:3],
+    )
+
+
+async def _call_backend(
+    *,
+    backend: str,
+    image_base64: Optional[str],
+    image_filename: Optional[str],
+    patient_age: Optional[int],
+    patient_sex: Optional[str],
+    symptoms: Optional[str],
+    clinical_notes: Optional[str],
+    current_medications: Optional[str],
+    alerts: list[RuleAlert],
+    structured_report: StructuredLabReport | None,
+) -> AnalysisResponse:
+    if backend == "medgemma":
+        return await run_in_threadpool(
+            medgemma_runtime.analyze,
+            image_base64=image_base64,
+            image_filename=image_filename,
+            patient_age=patient_age,
+            patient_sex=patient_sex,
+            symptoms=symptoms,
+            clinical_notes=clinical_notes,
+            current_medications=current_medications,
+            alerts=alerts,
+            structured_report=structured_report,
+        )
+
+    return await ollama_client.analyze(
+        image_base64=image_base64,
+        image_filename=image_filename,
+        patient_age=patient_age,
+        patient_sex=patient_sex,
+        symptoms=symptoms,
+        clinical_notes=clinical_notes,
+        current_medications=current_medications,
+        alerts=alerts,
+        structured_report=structured_report,
+    )
+
+
+async def _analyze_with_selected_backend(
+    *,
+    image_base64: Optional[str],
+    image_filename: Optional[str],
+    patient_age: Optional[int],
+    patient_sex: Optional[str],
+    symptoms: Optional[str],
+    clinical_notes: Optional[str],
+    current_medications: Optional[str],
+    alerts: list[RuleAlert],
+    structured_report: StructuredLabReport | None = None,
+    structured_reports: list[StructuredLabReport] | None = None,
+) -> AnalysisResponse:
+    global last_analysis
+
+    ollama_runtime = await _refresh_ollama_runtime_state()
+    if not _is_active("medgemma"):
+        model_runtime_state["medgemma"].update(
+            status="disabled",
+            message="MedGemma 已停用，不参与医生工作台分析。",
+            device=medgemma_runtime.actual_device(),
+            updated_at=_now_iso(),
+        )
+    elif medgemma_runtime.is_loaded():
+        model_runtime_state["medgemma"].update(
+            status="ready",
+            message="MedGemma 已加载，默认用于医生工作台分析。",
+            device=medgemma_runtime.actual_device(),
+            updated_at=_now_iso(),
+        )
+
+    medgemma_status = (
+        model_runtime_state["medgemma"]["status"]
+        if _is_active("medgemma")
+        else "disabled"
+    )
+    selected = _choose_backend(
+        medgemma_status,
+        bool(
+            _is_active("ollama")
+            and ollama_runtime.get("reachable")
+            and ollama_runtime.get("has_model")
+        ),
+    )
+    if selected is None:
+        raise HTTPException(status_code=502, detail="本地分析服务当前不可用，请联系管理员检查模型服务。")
+
+    used_fallback = selected == FALLBACK_BACKEND and medgemma_status != "ready"
+    fallback_reason = _fallback_reason(medgemma_status) if used_fallback else None
+
+    try:
+        response = await _call_backend(
+            backend=selected,
+            image_base64=image_base64,
+            image_filename=image_filename,
+            patient_age=patient_age,
+            patient_sex=patient_sex,
+            symptoms=symptoms,
+            clinical_notes=clinical_notes,
+            current_medications=current_medications,
+            alerts=alerts,
+            structured_report=structured_report,
+        )
+    except (MedGemmaNotConfiguredError, MedGemmaRuntimeError) as exc:
+        can_fallback_now = (
+            selected == PRIMARY_BACKEND
+            and _is_active("ollama")
+            and ollama_runtime.get("reachable")
+            and ollama_runtime.get("has_model")
+        )
+        if not can_fallback_now:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        selected = FALLBACK_BACKEND
+        used_fallback = True
+        fallback_reason = f"{_fallback_reason(medgemma_status)} 主模型运行失败：{exc}"
+        try:
+            response = await _call_backend(
+                backend=selected,
+                image_base64=image_base64,
+                image_filename=image_filename,
+                patient_age=patient_age,
+                patient_sex=patient_sex,
+                symptoms=symptoms,
+                clinical_notes=clinical_notes,
+                current_medications=current_medications,
+                alerts=alerts,
+                structured_report=structured_report,
+            )
+        except OllamaClientError as fallback_exc:
+            raise HTTPException(status_code=502, detail=str(fallback_exc)) from fallback_exc
+    except OllamaClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    response.inference = InferenceMeta(
+        backend=selected,
+        used_fallback=used_fallback,
+        primary_backend=PRIMARY_BACKEND,
+        fallback_reason=fallback_reason,
+    )
+
+    _postprocess_analysis_response(
+        response,
+        alerts=alerts,
+        symptoms=symptoms,
+        clinical_notes=clinical_notes,
+    )
+    response.applied_rules = alerts
+    response.structured_report = structured_report
+    response.structured_reports = structured_reports or ([structured_report] if structured_report else [])
+    response.referral_card = _build_referral_card(
+        response=response,
+        structured_report=structured_report,
+        alerts=alerts,
+    )
+    last_analysis = {
+        "backend": response.inference.backend,
+        "used_fallback": response.inference.used_fallback,
+        "risk_level": response.risk_level,
+        "created_at": _now_iso(),
+    }
+    return response
 
 
 async def _warm_medgemma() -> None:
@@ -212,6 +524,69 @@ def health() -> HealthResponse:
         ollama_base_url=settings.ollama_base_url,
         ollama_model=settings.ollama_model,
     )
+
+
+@app.get("/app")
+@app.get("/app/")
+@app.get("/app/{asset_path:path}")
+def serve_frontend_app(asset_path: str = "") -> FileResponse:
+    requested = _safe_frontend_path(asset_path) if asset_path else None
+    if requested and requested.is_file():
+        return FileResponse(requested)
+
+    index_path = WEB_DIST_DIR / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="前端静态资源尚未构建，请先运行 Mac app 打包脚本。")
+    return FileResponse(index_path)
+
+
+@app.get("/api/demo/cbc-sample")
+def demo_cbc_sample() -> dict:
+    if not SAMPLE_CBC_PATH.exists():
+        raise HTTPException(status_code=404, detail="未找到血常规演示样例，请先生成 sample-cbc-report.png。")
+    return {
+        "report_type": "cbc",
+        "patient_age": 63,
+        "patient_sex": "女",
+        "symptoms": "乏力、头晕 3 天。",
+        "clinical_notes": "血常规样例提示血红蛋白偏低，需结合症状进一步评估是否存在贫血相关风险。",
+        "current_medications": "未提供",
+        "image_url": "/api/demo/cbc-sample-image",
+        "image_name": SAMPLE_CBC_PATH.name,
+    }
+
+
+@app.get("/api/demo/chemistry-sample")
+def demo_chemistry_sample() -> dict:
+    if not SAMPLE_CHEM_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="未找到生化演示样例，请先生成 sample-chemistry-report.png。",
+        )
+    return {
+        "report_type": "chemistry_basic",
+        "patient_age": 58,
+        "patient_sex": "男",
+        "symptoms": "乏力、口渴 2 天。",
+        "clinical_notes": "生化样例提示血糖升高、肌酐轻度异常，需结合脱水与肾功能风险判断。",
+        "current_medications": "二甲双胍",
+        "image_url": "/api/demo/chemistry-sample-image",
+        "image_name": SAMPLE_CHEM_PATH.name,
+    }
+
+
+@app.get("/api/demo/cbc-sample-image")
+def demo_cbc_sample_image() -> FileResponse:
+    if not SAMPLE_CBC_PATH.exists():
+        raise HTTPException(status_code=404, detail="未找到血常规演示样例，请先生成 sample-cbc-report.png。")
+    return FileResponse(SAMPLE_CBC_PATH, media_type="image/png", filename=SAMPLE_CBC_PATH.name)
+
+
+@app.get("/api/demo/chemistry-sample-image")
+def demo_chemistry_sample_image() -> FileResponse:
+    if not SAMPLE_CHEM_PATH.exists():
+        raise HTTPException(status_code=404, detail="未找到生化演示样例，请先生成 sample-chemistry-report.png。")
+    return FileResponse(SAMPLE_CHEM_PATH, media_type="image/png", filename=SAMPLE_CHEM_PATH.name)
 
 
 @app.get("/api/ollama/status")
@@ -337,8 +712,6 @@ async def analyze_report(
     current_medications: Optional[str] = Form(default=None),
     backend: Optional[str] = Form(default=None),
 ) -> AnalysisResponse:
-    global last_analysis
-
     if not report_image and not symptoms and not clinical_notes:
         raise HTTPException(
             status_code=400,
@@ -355,85 +728,96 @@ async def analyze_report(
 
     alerts = evaluate_red_flags(symptoms, clinical_notes)
 
-    try:
-        ollama_runtime = await _refresh_ollama_runtime_state()
-        if not _is_active("medgemma"):
-            model_runtime_state["medgemma"].update(
-                status="disabled",
-                message="MedGemma 已停用，不参与医生工作台分析。",
-                device=medgemma_runtime.actual_device(),
-                updated_at=_now_iso(),
-            )
-        elif medgemma_runtime.is_loaded():
-            model_runtime_state["medgemma"].update(
-                status="ready",
-                message="MedGemma 已加载，默认用于医生工作台分析。",
-                device=medgemma_runtime.actual_device(),
-                updated_at=_now_iso(),
-            )
-
-        medgemma_status = (
-            model_runtime_state["medgemma"]["status"]
-            if _is_active("medgemma")
-            else "disabled"
-        )
-        selected = _choose_backend(
-            medgemma_status,
-            bool(
-                _is_active("ollama")
-                and ollama_runtime.get("reachable")
-                and ollama_runtime.get("has_model")
-            ),
-        )
-        if selected is None:
-            raise HTTPException(status_code=502, detail="本地分析服务当前不可用，请联系管理员检查模型服务。")
-
-        if selected == "medgemma":
-            response = await run_in_threadpool(
-                medgemma_runtime.analyze,
-                image_base64=image_base64,
-                image_filename=image_filename,
-                patient_age=patient_age,
-                patient_sex=patient_sex,
-                symptoms=symptoms,
-                clinical_notes=clinical_notes,
-                current_medications=current_medications,
-                alerts=alerts,
-            )
-        else:
-            response = await ollama_client.analyze(
-                image_base64=image_base64,
-                image_filename=image_filename,
-                patient_age=patient_age,
-                patient_sex=patient_sex,
-                symptoms=symptoms,
-                clinical_notes=clinical_notes,
-                current_medications=current_medications,
-                alerts=alerts,
-            )
-    except (OllamaClientError, MedGemmaNotConfiguredError, MedGemmaRuntimeError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    used_fallback = selected == FALLBACK_BACKEND and medgemma_status != "ready"
-    response.inference = InferenceMeta(
-        backend=selected,
-        used_fallback=used_fallback,
-        primary_backend=PRIMARY_BACKEND,
-        fallback_reason=_fallback_reason(medgemma_status) if used_fallback else None,
-    )
-
-    _postprocess_analysis_response(
-        response,
+    return await _analyze_with_selected_backend(
+        image_base64=image_base64,
+        image_filename=image_filename,
+        patient_age=patient_age,
+        patient_sex=patient_sex,
         alerts=alerts,
         symptoms=symptoms,
         clinical_notes=clinical_notes,
+        current_medications=current_medications,
     )
 
-    response.applied_rules = alerts
-    last_analysis = {
-        "backend": response.inference.backend,
-        "used_fallback": response.inference.used_fallback,
-        "risk_level": response.risk_level,
-        "created_at": _now_iso(),
-    }
-    return response
+
+@app.post("/api/report/extract-cbc", response_model=LabExtractionResponse)
+async def extract_cbc(
+    report_image: UploadFile = File(...),
+) -> LabExtractionResponse:
+    raw = await report_image.read()
+    try:
+        return await run_in_threadpool(
+            extract_cbc_from_image,
+            filename=report_image.filename,
+            raw_bytes=raw,
+        )
+    except CBCOCRExtractionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/report/analyze-cbc", response_model=AnalysisResponse)
+async def analyze_cbc(
+    payload: LabAnalysisInput = Body(...),
+) -> AnalysisResponse:
+    _validate_confirmed_lab_items(payload.report_type, payload.items)
+    structured_report = _build_structured_report(
+        items=payload.items,
+        source_image_name=payload.source_image_name,
+        report_type=payload.report_type,
+    )
+    text_alerts = evaluate_red_flags(payload.symptoms, payload.clinical_notes)
+    structured_alerts = evaluate_structured_lab_alerts(
+        payload.items,
+        symptoms=payload.symptoms,
+        clinical_notes=payload.clinical_notes,
+    )
+    alerts = _merge_alerts(text_alerts, structured_alerts)
+
+    return await _analyze_with_selected_backend(
+        image_base64=None,
+        image_filename=payload.source_image_name,
+        patient_age=payload.patient_age,
+        patient_sex=payload.patient_sex,
+        symptoms=payload.symptoms,
+        clinical_notes=payload.clinical_notes,
+        current_medications=payload.current_medications,
+        alerts=alerts,
+        structured_report=structured_report,
+        structured_reports=[structured_report] if structured_report else [],
+    )
+
+
+@app.post("/api/report/analyze-labs", response_model=AnalysisResponse)
+async def analyze_labs(
+    payload: MultiReportAnalysisInput = Body(...),
+) -> AnalysisResponse:
+    _validate_confirmed_reports(payload.reports)
+    text_alerts = evaluate_red_flags(payload.symptoms, payload.clinical_notes)
+    structured_alert_groups = [
+        evaluate_structured_lab_alerts(
+            report.items,
+            symptoms=payload.symptoms,
+            clinical_notes=payload.clinical_notes,
+        )
+        for report in payload.reports
+    ]
+    cross_report_alerts = evaluate_cross_report_alerts(
+        payload.reports,
+        symptoms=payload.symptoms,
+        clinical_notes=payload.clinical_notes,
+    )
+    alerts = _merge_alerts(text_alerts, *structured_alert_groups, cross_report_alerts)
+    structured_report = _combine_reports_for_prompt(payload.reports)
+
+    return await _analyze_with_selected_backend(
+        image_base64=None,
+        image_filename=structured_report.source_image_name if structured_report else None,
+        patient_age=payload.patient_age,
+        patient_sex=payload.patient_sex,
+        symptoms=payload.symptoms,
+        clinical_notes=payload.clinical_notes,
+        current_medications=payload.current_medications,
+        alerts=alerts,
+        structured_report=structured_report,
+        structured_reports=payload.reports,
+    )

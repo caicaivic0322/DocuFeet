@@ -7,7 +7,7 @@ from typing import Any, Optional
 import httpx
 
 from .config import settings
-from .models import AnalysisResponse, RuleAlert
+from .models import AnalysisResponse, RuleAlert, StructuredCBCReport
 from .prompting import build_system_prompt, build_user_prompt
 
 
@@ -27,6 +27,7 @@ class OllamaClient:
         clinical_notes: Optional[str],
         current_medications: Optional[str],
         alerts: list[RuleAlert],
+        structured_report: Optional[StructuredCBCReport] = None,
     ) -> AnalysisResponse:
         user_message: dict[str, Any] = {
             "role": "user",
@@ -38,6 +39,7 @@ class OllamaClient:
                 current_medications=current_medications,
                 alerts=alerts,
                 image_filename=image_filename,
+                structured_report=structured_report,
             ),
         }
         if image_base64:

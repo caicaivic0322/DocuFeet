@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .knowledge import CURATED_GUIDANCE
-from .models import RuleAlert
+from .models import RuleAlert, StructuredLabReport
 
 
 def build_system_prompt() -> str:
@@ -43,6 +43,7 @@ def build_user_prompt(
     current_medications: Optional[str],
     alerts: list[RuleAlert],
     image_filename: Optional[str],
+    structured_report: Optional[StructuredLabReport] = None,
 ) -> str:
     rule_lines = "\n".join(
         f'- {alert.title} | 风险={alert.risk_level} | 命中={", ".join(alert.matched_terms)} | 原因={alert.rationale} | 建议={alert.recommended_action}'
@@ -52,6 +53,7 @@ def build_user_prompt(
     knowledge_lines = "\n".join(
         f'- {item["source"]}: {item["excerpt"]}' for item in CURATED_GUIDANCE
     )
+    structured_lines = _format_structured_report(structured_report)
 
     return f"""请结合上传的检查单图片与以下信息生成基层医生版结果。
 
@@ -71,6 +73,9 @@ def build_user_prompt(
 [图片文件名]
 {image_filename or "未上传图片"}
 
+[确认后的结构化检验字段]
+{structured_lines}
+
 [规则命中]
 {rule_lines}
 
@@ -83,3 +88,19 @@ def build_user_prompt(
 3. 在基层条件下最实际的下一步动作
 
 再次强调：不要给出确定诊断。"""
+
+
+def _format_structured_report(structured_report: Optional[StructuredLabReport]) -> str:
+    if not structured_report or not structured_report.items:
+        return "- 未提供结构化检验字段"
+
+    lines = []
+    lines.append(f"- 报告类型: {structured_report.report_type}")
+    if structured_report.source_image_name:
+        lines.append(f"- 来源文件: {structured_report.source_image_name}")
+    for item in structured_report.items:
+        lines.append(
+            f'- {item.name}: 数值={item.value or "缺失"} | 单位={item.unit or "未提供"} | '
+            f'参考范围={item.reference_range or "未提供"} | 异常={item.flag}'
+        )
+    return "\n".join(lines)

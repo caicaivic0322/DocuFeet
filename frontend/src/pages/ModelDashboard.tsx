@@ -11,6 +11,10 @@ const statusLabel = {
   disabled: '已停用',
 }
 
+const isFileApp = window.location.protocol === 'file:'
+const homeHref = isFileApp ? './index.html' : '/'
+const modelsHref = isFileApp ? './index.html#/models' : '/models'
+
 function pickModel(status: InferenceStatus | null, backend: string): ModelRuntime | null {
   return status?.models.find((model) => model.backend === backend) ?? null
 }
@@ -66,7 +70,7 @@ export function ModelDashboard() {
   return (
     <div className="app-shell models-shell">
       <header className="topbar">
-        <a className="brand-lockup" href="/">
+        <a className="brand-lockup" href={homeHref}>
           <span className="brand-mark">赤</span>
           <span>
             <strong>赤脚医生</strong>
@@ -74,8 +78,8 @@ export function ModelDashboard() {
           </span>
         </a>
         <nav className="topnav" aria-label="主导航">
-          <a href="/">工作台</a>
-          <a aria-current="page" href="/models">
+          <a href={homeHref}>工作台</a>
+          <a aria-current="page" href={modelsHref}>
             模型管理
           </a>
         </nav>

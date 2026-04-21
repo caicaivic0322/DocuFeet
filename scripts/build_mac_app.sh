@@ -57,6 +57,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 PLIST
 
 printf '%s\n' "$ROOT_DIR" > "$RESOURCES_DIR/repo-root.txt"
+cp -R "$ROOT_DIR/frontend/dist" "$RESOURCES_DIR/web"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 if command -v codesign >/dev/null 2>&1; then

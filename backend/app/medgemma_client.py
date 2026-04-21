@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import settings
-from .models import AnalysisResponse, RuleAlert
+from .models import AnalysisResponse, RuleAlert, StructuredCBCReport
 from .prompting import build_system_prompt, build_user_prompt
 
 
@@ -253,6 +253,7 @@ class MedGemmaRuntime:
         clinical_notes: Optional[str],
         current_medications: Optional[str],
         alerts: list[RuleAlert],
+        structured_report: Optional[StructuredCBCReport] = None,
     ) -> AnalysisResponse:
         self._ensure_loaded()
         assert self._processor is not None and self._model is not None
@@ -266,6 +267,7 @@ class MedGemmaRuntime:
             current_medications=current_medications,
             alerts=alerts,
             image_filename=image_filename,
+            structured_report=structured_report,
         )
 
         try:

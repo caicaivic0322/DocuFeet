@@ -1,6 +1,9 @@
 export type RiskLevel = '低风险' | '中风险' | '高风险'
 
 export type BackendName = 'medgemma' | 'ollama'
+export type ItemFlag = 'high' | 'low' | 'normal' | 'unknown'
+export type ReferralDecision = '观察' | '尽快复诊' | '建议转诊' | '立即转诊'
+export type LabReportType = 'cbc' | 'chemistry_basic'
 
 export type RuleAlert = {
   title: string
@@ -22,6 +25,56 @@ export type InferenceMeta = {
   fallback_reason: string | null
 }
 
+export type LabReportItem = {
+  name:
+    | 'WBC'
+    | 'RBC'
+    | 'HGB'
+    | 'PLT'
+    | 'Cr'
+    | 'BUN'
+    | 'eGFR'
+    | 'K'
+    | 'Na'
+    | 'Cl'
+    | 'GLU'
+    | 'ALT'
+    | 'AST'
+    | 'TBIL'
+    | 'ALB'
+  alias: string
+  value: string
+  unit: string
+  reference_range: string
+  flag: ItemFlag
+  confidence: number
+  confirmed: boolean
+  edited_by_user: boolean
+}
+
+export type LabExtractionResponse = {
+  report_type: LabReportType
+  source_image_name: string | null
+  raw_text: string
+  items: LabReportItem[]
+  missing_required_items: LabReportItem['name'][]
+  can_analyze: boolean
+  notice: string | null
+}
+
+export type StructuredLabReport = {
+  report_type: LabReportType
+  source_image_name: string | null
+  items: LabReportItem[]
+}
+
+export type ReferralCard = {
+  decision: ReferralDecision
+  reasons: string[]
+  suggested_checks: string[]
+  handoff_notes: string[]
+}
+
 export type AnalysisResponse = {
   risk_level: RiskLevel
   doctor_summary: string
@@ -33,6 +86,9 @@ export type AnalysisResponse = {
   citations: CitationItem[]
   applied_rules: RuleAlert[]
   inference: InferenceMeta | null
+  structured_report: StructuredLabReport | null
+  structured_reports: StructuredLabReport[]
+  referral_card: ReferralCard | null
   disclaimer: string
 }
 
@@ -77,3 +133,37 @@ export type AnalyzeReportInput = {
   clinicalNotes: string
   currentMedications: string
 }
+
+export type AnalyzeCBCInput = {
+  reportType: LabReportType
+  patientAge: string
+  patientSex: string
+  symptoms: string
+  clinicalNotes: string
+  currentMedications: string
+  sourceImageName: string | null
+  items: LabReportItem[]
+}
+
+export type AnalyzeLabsInput = {
+  patientAge: string
+  patientSex: string
+  symptoms: string
+  clinicalNotes: string
+  currentMedications: string
+  reports: StructuredLabReport[]
+}
+
+export type DemoCBCSample = {
+  report_type: LabReportType
+  patient_age: number
+  patient_sex: string
+  symptoms: string
+  clinical_notes: string
+  current_medications: string
+  image_url: string
+  image_name: string
+}
+
+export type CBCReportItem = LabReportItem
+export type CBCExtractionResponse = LabExtractionResponse

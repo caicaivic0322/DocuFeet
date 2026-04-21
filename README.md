@@ -85,6 +85,10 @@ npm run dev
 
 - 可用 `docs/sample-report.png` 作为本地图片上传联调样例
 - 可用 `python3 scripts/make_sample_report.py` 重新生成样例图
+- 可用 `docs/sample-cbc-report.png` 作为血常规 OCR 联调样例
+- 可用 `backend/.venv/bin/python scripts/make_sample_cbc_report.py` 重新生成血常规样例图
+- 可用 `docs/sample-chemistry-report.png` 作为生化基础项 OCR 联调样例
+- 可用 `backend/.venv/bin/python scripts/make_sample_chemistry_report.py` 重新生成生化样例图
 
 ## MedGemma 部署
 

@@ -6,7 +6,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow?
     private var webView: WKWebView?
     private var backendProcess: Process?
-    private var frontendProcess: Process?
     private var logHandles: [FileHandle] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -14,12 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         startServices(repoRoot: repoRoot)
         showWindow()
         showBootScreen(message: "正在启动本地医疗助手服务...")
-        waitForFrontend(remainingAttempts: 45)
+        waitForBackend(remainingAttempts: 45)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         backendProcess?.terminate()
-        frontendProcess?.terminate()
         logHandles.forEach { $0.closeFile() }
     }
 
@@ -62,22 +60,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     private func loadApp() {
-        guard let url = URL(string: "http://127.0.0.1:5173/") else {
+        guard let url = URL(string: "http://127.0.0.1:8001/app/") else {
+            showBootScreen(message: "本地前端地址无效。")
             return
         }
         webView?.load(URLRequest(url: url))
     }
 
-    private func waitForFrontend(remainingAttempts: Int) {
+    private func waitForBackend(remainingAttempts: Int) {
         guard remainingAttempts > 0 else {
             showBootScreen(
-                message: "前端服务启动超时。请检查 /tmp/docufeet-frontend.log 和 /tmp/docufeet-backend.log。"
+                message: "后端服务启动超时。请检查 /tmp/docufeet-backend.log。"
             )
             return
         }
 
-        guard let url = URL(string: "http://127.0.0.1:5173/") else {
-            showBootScreen(message: "本地前端地址无效。")
+        guard let url = URL(string: "http://127.0.0.1:8001/api/health") else {
+            showBootScreen(message: "本地后端地址无效。")
             return
         }
 
@@ -91,9 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                     return
                 }
 
-                self?.showBootScreen(message: "正在等待前端服务启动...")
+                self?.showBootScreen(message: "正在等待后端服务启动...")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self?.waitForFrontend(remainingAttempts: remainingAttempts - 1)
+                    self?.waitForBackend(remainingAttempts: remainingAttempts - 1)
                 }
             }
         }.resume()
@@ -150,6 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func startServices(repoRoot: URL) {
         if !isPortListening(8001) {
+            let webDistPath = Bundle.main.resourceURL?
+                .appendingPathComponent("web", isDirectory: true)
+                .standardizedFileURL
+                .path
             backendProcess = launch(
                 executable: URL(fileURLWithPath: "/usr/bin/env"),
                 arguments: [
@@ -158,38 +161,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                     "source .venv/bin/activate && python -m uvicorn app.main:app --host 127.0.0.1 --port 8001",
                 ],
                 workingDirectory: repoRoot.appendingPathComponent("backend"),
-                logName: "docufeet-backend.log"
+                logName: "docufeet-backend.log",
+                extraEnvironment: webDistPath.map { ["DOCUFEET_WEB_DIST": $0] } ?? [:]
             )
         }
 
-        if !isPortListening(5173) {
-            frontendProcess = launch(
-                executable: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: [
-                    "bash",
-                    "-lc",
-                    "npm run preview -- --host 127.0.0.1 --port 5173",
-                ],
-                workingDirectory: repoRoot.appendingPathComponent("frontend"),
-                logName: "docufeet-frontend.log"
-            )
-        }
     }
 
     private func launch(
         executable: URL,
         arguments: [String],
         workingDirectory: URL,
-        logName: String
+        logName: String,
+        extraEnvironment: [String: String] = [:]
     ) -> Process? {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
-        process.environment = [
+        var environment = [
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": NSHomeDirectory(),
         ]
+        extraEnvironment.forEach { environment[$0.key] = $0.value }
+        process.environment = environment
 
         if let logHandle = openLogHandle(name: logName) {
             process.standardOutput = logHandle
